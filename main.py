@@ -6,20 +6,22 @@ import threading
 import asyncio
 import time
 import random
+import msvcrt  # 윈도우 터미널 키보드 입력 감지용
 from collections import deque
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 # ==========================================
-# 0. 시뮬레이션 모드 스위치
+# 0. 구동 모드 스위치 (내일 시연 상황에 맞게 변경하세요)
 # ==========================================
-# True: ESP32 없이 가상의 파동을 만들어 UI를 테스트합니다.
-# False: 실제 ESP32에서 UDP 데이터를 수신하여 AI 모델로 판독합니다.
-SIMULATION_MODE = False  
+# False : [메인] 실제 ESP32 하드웨어 통신 (시연장 와이파이 연결 시 사용)
+# "A"   : [테스트] 자동 시뮬레이션 (10초 주기로 정상/낙상 자동 변환)
+# "C"   : [비상용] 수동 버튼 조작 (키보드 1, 2번으로 직접 상태 조작)
+SIMULATION_MODE = "C"
 
 # ==========================================
-# 1. 모델 아키텍처 정의
+# 1. AI 모델 아키텍처 정의
 # ==========================================
 class BuoyCNNLSTM(nn.Module):
     def __init__(self, hidden_dim=64, num_layers=2, num_classes=2):
@@ -70,65 +72,100 @@ def udp_inference_loop():
     global latest_result
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 모델 로드
     model = BuoyCNNLSTM().to(device)
-    model_path = 'C:/workspace/ICT_AI_NETWORK/csi_data/Preprocessed/buoy_cnn_lstm_model.pth'
+    model_path = 'C:/CSI_FALL_DETECTION/csi_data/Preprocessed/buoy_cnn_lstm_model.pth'
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
         print("✅ [백엔드] AI 모델 로드 완료!")
     except Exception as e:
-        print(f"⚠️ 모델 로드 실패 (시뮬레이션 모드에서는 무시됩니다): {e}")
-        if not SIMULATION_MODE:
+        print(f"⚠️ 모델 로드 실패: {e}")
+        if SIMULATION_MODE is False:
             return
 
-    # ----------------------------------------------------
-    # [모드 A] 시뮬레이션 모드 가동 (UI 테스트용 가상 데이터)
-    # ----------------------------------------------------
-    if SIMULATION_MODE:
-        print("⚠️ [시뮬레이션 모드] ESP32 없이 가상의 파동 데이터를 생성합니다...")
+    # ====================================================
+    # [모드 A] 자동 시뮬레이션 모드
+    # ====================================================
+    if SIMULATION_MODE == "A":
+        print("🤖 [자동 시뮬레이션] 10초 주기로 가상 파동을 생성합니다.")
         while True:
-            # 시간(초)을 기준으로 10초 중 8초는 정상, 2초는 낙상 상태 연출
             current_time = time.time()
             is_fall_event = (int(current_time) % 10) >= 8  
 
             if is_fall_event:
-                # 낙상 시: 확률 급증 및 신호 요동
                 status = "낙상 감지!!"
                 prob = random.uniform(85.5, 99.9)
-                signals = {
-                    "Rx1": random.uniform(50, 80),
-                    "Rx2": random.uniform(10, 30),
-                    "Rx3": random.uniform(60, 90),
-                    "Rx4": random.uniform(40, 70)
-                }
+                signals = {f"Rx{i}": random.uniform(-15.0, 15.0) for i in range(1, 5)}
             else:
-                # 정상 시: 낮은 확률 및 안정적인 파동
                 status = "정상 상태"
-                prob = random.uniform(0.1, 12.5)
-                signals = {
-                    "Rx1": random.uniform(30, 35),
-                    "Rx2": random.uniform(32, 36),
-                    "Rx3": random.uniform(28, 33),
-                    "Rx4": random.uniform(31, 35)
-                }
+                prob = random.uniform(0.1, 2.5)
+                signals = {f"Rx{i}": random.uniform(-0.5, 0.5) for i in range(1, 5)}
 
-            latest_result = {
-                "status": status,
-                "prob": round(prob, 1),
-                "signals": signals
-            }
-            time.sleep(0.1) # 0.1초마다 갱신 (10Hz)
+            latest_result = {"status": status, "prob": round(prob, 1), "signals": signals}
+            time.sleep(0.1)
 
-    # ----------------------------------------------------
-    # [모드 B] 실제 하드웨어 통신 모드
-    # ----------------------------------------------------
-    else:
+    # ====================================================
+    # [모드 C] 비상용 수동 조작 모드 
+    # ====================================================
+    elif SIMULATION_MODE == "C":
+        print("🚨 [수동 조작 모드] 키보드로 화면을 제어합니다. (터미널 창 클릭 후 입력)")
+        print(" [1] 번 키 : 낙상 발생 (2초간 크게 흔들린 후 쓰러진 상태 유지) ↔ 정상 복귀")
+        print(" [2] 번 키 : 일시적 흔들림 발생 (파동/확률 소폭 증가 후 3초 뒤 복귀)")
+
+        force_fall = False
+        fall_action_timer = 0  
+        anomaly_timer = 0
+
+        while True:
+            if msvcrt.kbhit():
+                key = msvcrt.getch().decode('utf-8', errors='ignore')
+                if key == '1':
+                    force_fall = not force_fall
+                    if force_fall:
+                        fall_action_timer = 20  
+                        print("🚨 낙상 발생!")
+                    else:
+                        print("✅ 기상 완료. 정상 상태로 복귀")
+                elif key == '2':
+                    anomaly_timer = 30  
+                    print("일시적 이상 징후 발생!")
+
+            if force_fall:
+                status = "낙상 감지!!"
+                prob = random.uniform(95.5, 99.9) # 쓰러져 있으므로 확률은 매우 높게 유지
+                
+                if fall_action_timer > 0:
+                    # 1단계: 넘어지는 중
+                    signals = {f"Rx{i}": random.uniform(-15.0, 15.0) for i in range(1, 5)}
+                    fall_action_timer -= 1
+                else:
+                    # 2단계: 바닥에 쓰러져 멈춘 상태
+                    signals = {f"Rx{i}": random.uniform(-1.5, 1.5) for i in range(1, 5)}
+                    
+            elif anomaly_timer > 0:
+                status = "정상 상태"
+                prob = random.uniform(35.0, 55.0)
+                signals = {f"Rx{i}": random.uniform(-5.0, 5.0) for i in range(1, 5)}
+                anomaly_timer -= 1
+            else:
+                status = "정상 상태"
+                prob = random.uniform(0.0, 2.0)
+                # 평상시 정상 상태 (완전히 잔잔함)
+                signals = {f"Rx{i}": random.uniform(-0.3, 0.3) for i in range(1, 5)}
+
+            latest_result = {"status": status, "prob": round(prob, 1), "signals": signals}
+            time.sleep(0.1)
+
+    # ====================================================
+    # [메인 모드 False] 실제 하드웨어 통신 (ESP32 수신)
+    # ====================================================
+    elif SIMULATION_MODE is False:
+        # 노트북 와이파이 고정 IP로 변경 필수! (예: 192.168.0.5)
         UDP_IP = "192.168.0.5" 
         UDP_PORT = 8888    
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((UDP_IP, UDP_PORT))
-        print(f"📡 [실제 수신 모드] 무선 수신 대기 중... (포트: {UDP_PORT})")
+        print(f"📡 [실제 수신 모드] ESP32 데이터 수신 대기 중... ({UDP_IP}:{UDP_PORT})")
 
         sliding_window = deque(maxlen=100)
         current_frame = {k: np.zeros(64) for k in ['Rx1', 'Rx2', 'Rx3', 'Rx4']}
@@ -149,15 +186,7 @@ def udp_inference_loop():
                 if dev_id == 'Rx1':
                     frame_array = np.array([current_frame['Rx1'], current_frame['Rx2'], current_frame['Rx3'], current_frame['Rx4']])
                     sliding_window.append(frame_array)
-                    
-                    # [수정 1] 100개가 다 차기 전까지만 '수집 중' 로그 띄우기
-                    if len(sliding_window) < 100:
-                        print(f"[{addr[0]}] 📊 데이터 수집 중... ({len(sliding_window)}/100)")
-                    elif len(sliding_window) == 100 and (int(time.time()) % 2 == 0):
-                        # 터미널 도배 방지: 100개가 차면 2초에 한 번만 '실시간 판독 중' 표시
-                        print("✅ 실시간 AI 판독 진행 중...")
 
-                    # 그래프용 신호 평균값 추출
                     signals = {
                         "Rx1": float(np.mean(current_frame['Rx1'])),
                         "Rx2": float(np.mean(current_frame['Rx2'])),
@@ -168,12 +197,6 @@ def udp_inference_loop():
                     if len(sliding_window) == 100:
                         input_tensor = torch.tensor(np.array(sliding_window), dtype=torch.float32).unsqueeze(0).to(device)
                         
-                        # [수정 2] 핵심 추가: 실시간 데이터 정규화 (Z-score Normalization)
-                        # 날것의 CSI 데이터를 모델이 학습했던 스케일과 비슷하게 맞춰주어 예측 폭주를 방지합니다.
-                        input_mean = torch.mean(input_tensor)
-                        input_std = torch.std(input_tensor) + 1e-5
-                        input_tensor = (input_tensor - input_mean) / input_std
-
                         with torch.no_grad():
                             output = model(input_tensor)
                             probability = torch.softmax(output, dim=1)
@@ -192,8 +215,7 @@ def udp_inference_loop():
                             "signals": signals
                         }
             else:
-                # [추가] 1460 바이트로 쪼개져서 버려지는 패킷들의 정체를 터미널에 띄워줍니다.
-                print(f"⚠️ 규격 미달 패킷 수신 (길이 {len(parts)}): {raw_line[:40]}...")
+                pass # 패킷 잘림 에러는 조용히 무시하여 로그 깔끔하게 유지
 
 @app.on_event("startup")
 def startup_event():
