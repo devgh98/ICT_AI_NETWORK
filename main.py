@@ -16,7 +16,7 @@ import uvicorn
 # ==========================================
 # True: ESP32 없이 가상의 파동을 만들어 UI를 테스트합니다.
 # False: 실제 ESP32에서 UDP 데이터를 수신하여 AI 모델로 판독합니다.
-SIMULATION_MODE = True  
+SIMULATION_MODE = False  
 
 # ==========================================
 # 1. 모델 아키텍처 정의
@@ -72,7 +72,7 @@ def udp_inference_loop():
     
     # 모델 로드
     model = BuoyCNNLSTM().to(device)
-    model_path = 'C:/CSI_FALL_DETECTION/csi_data/Preprocessed/buoy_cnn_lstm_model.pth'
+    model_path = 'C:/workspace/ICT_AI_NETWORK/csi_data/Preprocessed/buoy_cnn_lstm_model.pth'
     try:
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.eval()
@@ -124,7 +124,7 @@ def udp_inference_loop():
     # [모드 B] 실제 하드웨어 통신 모드
     # ----------------------------------------------------
     else:
-        UDP_IP = "0.0.0.0" 
+        UDP_IP = "192.168.0.5" 
         UDP_PORT = 8888    
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((UDP_IP, UDP_PORT))
@@ -134,7 +134,7 @@ def udp_inference_loop():
         current_frame = {k: np.zeros(64) for k in ['Rx1', 'Rx2', 'Rx3', 'Rx4']}
 
         while True:
-            data, _ = sock.recvfrom(4096)
+            data, addr = sock.recvfrom(4096)
             raw_line = data.decode('utf-8', errors='ignore').strip()
             parts = raw_line.split(',')
             
@@ -149,27 +149,51 @@ def udp_inference_loop():
                 if dev_id == 'Rx1':
                     frame_array = np.array([current_frame['Rx1'], current_frame['Rx2'], current_frame['Rx3'], current_frame['Rx4']])
                     sliding_window.append(frame_array)
+                    
+                    # [수정 1] 100개가 다 차기 전까지만 '수집 중' 로그 띄우기
+                    if len(sliding_window) < 100:
+                        print(f"[{addr[0]}] 📊 데이터 수집 중... ({len(sliding_window)}/100)")
+                    elif len(sliding_window) == 100 and (int(time.time()) % 2 == 0):
+                        # 터미널 도배 방지: 100개가 차면 2초에 한 번만 '실시간 판독 중' 표시
+                        print("✅ 실시간 AI 판독 진행 중...")
+
+                    # 그래프용 신호 평균값 추출
+                    signals = {
+                        "Rx1": float(np.mean(current_frame['Rx1'])),
+                        "Rx2": float(np.mean(current_frame['Rx2'])),
+                        "Rx3": float(np.mean(current_frame['Rx3'])),
+                        "Rx4": float(np.mean(current_frame['Rx4']))
+                    }
 
                     if len(sliding_window) == 100:
                         input_tensor = torch.tensor(np.array(sliding_window), dtype=torch.float32).unsqueeze(0).to(device)
+                        
+                        # [수정 2] 핵심 추가: 실시간 데이터 정규화 (Z-score Normalization)
+                        # 날것의 CSI 데이터를 모델이 학습했던 스케일과 비슷하게 맞춰주어 예측 폭주를 방지합니다.
+                        input_mean = torch.mean(input_tensor)
+                        input_std = torch.std(input_tensor) + 1e-5
+                        input_tensor = (input_tensor - input_mean) / input_std
+
                         with torch.no_grad():
                             output = model(input_tensor)
                             probability = torch.softmax(output, dim=1)
                             pred_class = torch.argmax(probability, dim=1).item()
                             fall_prob = probability[0][1].item() * 100
 
-                        signals = {
-                            "Rx1": float(np.mean(current_frame['Rx1'])),
-                            "Rx2": float(np.mean(current_frame['Rx2'])),
-                            "Rx3": float(np.mean(current_frame['Rx3'])),
-                            "Rx4": float(np.mean(current_frame['Rx4']))
-                        }
-
                         latest_result = {
                             "status": "낙상 감지!!" if pred_class == 1 else "정상 상태",
                             "prob": round(fall_prob, 1),
                             "signals": signals
                         }
+                    else:
+                        latest_result = {
+                            "status": f"데이터 수집 중... ({len(sliding_window)}%)",
+                            "prob": 0.0,
+                            "signals": signals
+                        }
+            else:
+                # [추가] 1460 바이트로 쪼개져서 버려지는 패킷들의 정체를 터미널에 띄워줍니다.
+                print(f"⚠️ 규격 미달 패킷 수신 (길이 {len(parts)}): {raw_line[:40]}...")
 
 @app.on_event("startup")
 def startup_event():

@@ -6,9 +6,9 @@ const char* ssid = "aiNetwork";
 const char* password = "ainetwork1004!"; 
 
 WiFiUDP udp;
-const char* laptop_ip = "192.168.0.3"; 
+const char* laptop_ip = "192.168.0.5"; 
 const int udp_port = 8888;              
-const char* device_id = "Rx4";          
+const char* device_id = "Rx1";          
 
 volatile int packet_count = 0; 
 
@@ -35,6 +35,7 @@ void setup() {
   
   while (WiFi.status() != WL_CONNECTED) delay(500);
   Serial.println("WiFi Connected!");
+  Serial.println(WiFi.localIP());
   
   ESP_ERROR_CHECK(esp_wifi_set_csi_rx_cb(&_csi_rx_cb, NULL));
   wifi_csi_config_t csi_config = {
